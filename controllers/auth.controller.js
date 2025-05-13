@@ -16,8 +16,7 @@ async function login(req, res) {
     expiresIn: '1d',
   });
 
-  res.json({ token });
-  res.json({ token, nome: usuario.nome });
+res.json({ token, nome: usuario.nome });
 }
 
 async function register(req, res) {
