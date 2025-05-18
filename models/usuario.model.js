@@ -6,11 +6,14 @@ async function encontrarUsuarioPorEmail(email) {
 }
 
 async function criarUsuario({ nome, email, senhaHash }) {
-  const res = await pool.query(
-    `INSERT INTO usuarios (nome, email, senha_hash) VALUES ($1, $2, $3) RETURNING *`,
+  const result = await pool.query(
+    `INSERT INTO usuarios (nome, email, senha_hash)
+     VALUES ($1, $2, $3)
+     RETURNING *`,
     [nome, email, senhaHash]
   );
-  return res.rows[0];
+
+  return result.rows[0];
 }
 
 module.exports = { encontrarUsuarioPorEmail, criarUsuario };
