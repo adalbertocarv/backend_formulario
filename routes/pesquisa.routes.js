@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
+
 const { enviarPesquisa, getPesquisasComFiltros } = require('../controllers/pesquisa.controller');
-const autenticar = require('../middlewares/auth.middleware');
+const { autenticar } = require('../middlewares/auth.middleware');  
 
 // Envio de nova pesquisa
 router.post('/', autenticar, enviarPesquisa);
