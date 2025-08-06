@@ -1,96 +1,147 @@
-const pool = require('../utils/db');
+const pool = require("../utils/db");
 
-// 📊 Resumo do painel (dashboard)
-exports.getDashboardSummary = async (req, res) => {
+/* =========================================================================
+ * 1 ─ Resumo do painel
+ *    GET /dashboard/summary
+ * ========================================================================= */
+exports.getDashboardSummary = async (_req, res) => {
   try {
-    const hoje = new Date();
-    hoje.setHours(0, 0, 0, 0);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0); // 00:00:00 de hoje
 
-    const [totalPesquisas, totalPesquisadores, pesquisadoresAtivos, pesquisasHoje, pesquisasRecentes] =
-      await Promise.all([
-        pool.query('SELECT COUNT(*) FROM pesquisas'),
-        pool.query('SELECT COUNT(*) FROM pesquisadores'),
-        pool.query(
-          `SELECT COUNT(*) FROM pesquisadores WHERE ultimo_acesso >= NOW() - INTERVAL '24 hours'`
-        ),
-        pool.query(
-          `SELECT COUNT(*) FROM pesquisas WHERE data_hora >= $1`,
-          [hoje]
-        ),
-        pool.query(
-          `SELECT p.*, u.nome AS nome_pesquisador
-           FROM pesquisas p
-           JOIN pesquisadores pe ON p.pesquisador_id = pe.id
-           JOIN usuarios u ON pe.usuario_id = u.id
-           ORDER BY data_hora DESC LIMIT 5`
-        ),
-      ]);
+    // um SELECT com quatro sub‑queries evita round‑trips extras
+    const {
+      rows: [tot],
+    } = await pool.query(
+      `
+      SELECT
+        (SELECT COUNT(*) FROM entrevistas)                                                AS total_surveys,
+        (SELECT COUNT(*) FROM pesquisadores)                                              AS total_researchers,
+        (SELECT COUNT(*) FROM pesquisadores
+           WHERE ultimo_acesso >= NOW() - INTERVAL '24 HOURS')                            AS active_researchers,
+        (SELECT COUNT(*) FROM entrevistas
+           WHERE inicio_em >= $1)                                                         AS surveys_today
+      `,
+      [todayStart]
+    );
+
+    // 5 entrevistas mais recentes
+    const { rows: recent } = await pool.query(
+      `
+      SELECT e.id,
+             e.inicio_em,
+             e.fim_em,
+             u.nome AS pesquisador_nome
+      FROM entrevistas  e
+      JOIN pesquisadores pe ON e.pesquisador_id = pe.id
+      JOIN usuarios      u  ON pe.usuario_id    = u.id
+      ORDER BY e.inicio_em DESC
+      LIMIT 5;
+      `
+    );
 
     res.json({
-      totalSurveys: parseInt(totalPesquisas.rows[0].count, 10),
-      totalResearchers: parseInt(totalPesquisadores.rows[0].count, 10),
-      activeResearchers: parseInt(pesquisadoresAtivos.rows[0].count, 10),
-      surveysToday: parseInt(pesquisasHoje.rows[0].count, 10),
-      recentSurveys: pesquisasRecentes.rows.map(row => ({
-        ...row,
-        pesquisador: {
-          usuario: {
-            nome: row.nome_pesquisador
-          }
-        }
-      }))
+      totalSurveys: Number(tot.total_surveys),
+      totalResearchers: Number(tot.total_researchers),
+      activeResearchers: Number(tot.active_researchers),
+      surveysToday: Number(tot.surveys_today),
+      recentSurveys: recent.map((r) => ({
+        id: r.id,
+        inicioEm: r.inicio_em,
+        fimEm: r.fim_em,
+        pesquisador: { usuario: { nome: r.pesquisador_nome } },
+      })),
     });
   } catch (err) {
-    console.error('Erro no resumo do dashboard:', err);
-    res.status(500).json({ erro: 'Erro ao gerar resumo do dashboard' });
+    console.error("Erro no resumo do dashboard:", err);
+    res.status(500).json({ erro: "Erro ao gerar resumo do dashboard" });
   }
 };
 
-// 📍 Pontos para o mapa
-exports.getMapPoints = async (req, res) => {
+/* =========================================================================
+ * 2 ─ Pontos para o mapa
+ *    GET /dashboard/map-points
+ * ========================================================================= */
+exports.getMapPoints = async (_req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT p.id, p.latitude, p.longitude, p.data_hora, p.idade, p.sexo, u.nome
-      FROM pesquisas p
-      JOIN pesquisadores pe ON p.pesquisador_id = pe.id
-      JOIN usuarios u ON pe.usuario_id = u.id
-    `);
+    const { rows } = await pool.query(
+      `
+      SELECT
+        e.id,
+        ST_Y(e.localizacao)::float  AS lat,
+        ST_X(e.localizacao)::float  AS lng,
+        e.inicio_em,
+        u.nome                      AS pesquisador_nome,
 
-    const points = result.rows.map(row => ({
-      id: row.id,
-      lat: row.latitude,
-      lng: row.longitude,
+        /* idade  – pergunta 2 (inteiro) */
+        (SELECT r.resposta::int
+           FROM respostas r
+          WHERE r.entrevista_id = e.id
+            AND r.pergunta_id   = 2
+          LIMIT 1)              AS idade,
+
+        /* sexo  – pergunta 1 (unica_escolha) */
+        COALESCE(
+          (SELECT o.valor            -- se quiser a sigla (M/F/O)
+             FROM respostas r
+             JOIN opcoes o ON o.id = r.opcao_id
+            WHERE r.entrevista_id = e.id
+              AND r.pergunta_id   = 1
+            LIMIT 1),
+          (SELECT r.resposta
+             FROM respostas r
+            WHERE r.entrevista_id = e.id
+              AND r.pergunta_id   = 1
+            LIMIT 1)
+        )                       AS sexo
+      FROM entrevistas e
+      JOIN pesquisadores pe ON e.pesquisador_id = pe.id
+      JOIN usuarios      u  ON pe.usuario_id    = u.id
+      WHERE e.localizacao IS NOT NULL;
+      `
+    );
+
+    const points = rows.map((r) => ({
+      id: r.id,
+      lat: r.lat,
+      lng: r.lng,
       info: {
-        pesquisador: row.nome || 'Desconhecido',
-        dataHora: row.data_hora,
-        idade: row.idade,
-        sexo: row.sexo,
+        pesquisador: r.pesquisador_nome || "Desconhecido",
+        dataHora: r.inicio_em,
+        idade: r.idade,
+        sexo: r.sexo,
       },
     }));
 
     res.json(points);
   } catch (err) {
-    console.error('Erro ao obter pontos do mapa:', err);
-    res.status(500).json({ erro: 'Erro ao obter dados de pontos do mapa' });
+    console.error("Erro ao obter pontos do mapa:", err);
+    res.status(500).json({ erro: "Erro ao obter dados de pontos do mapa" });
   }
 };
 
-// 🔥 Dados para heatmap
-exports.getHeatmapData = async (req, res) => {
+/* =========================================================================
+ * 3 ─ Dados para Heatmap
+ *    GET /dashboard/heatmap
+ * ========================================================================= */
+exports.getHeatmapData = async (_req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT latitude, longitude
-      FROM pesquisas
-    `);
+    const { rows } = await pool.query(
+      `
+      SELECT
+        ST_Y(localizacao)::float AS lat,
+        ST_X(localizacao)::float AS lng
+      FROM entrevistas
+      WHERE localizacao IS NOT NULL;
+      `
+    );
 
-    const heatmap = {
-      points: result.rows.map(row => [row.latitude, row.longitude, 1]),
-      radius: 25,
-    };
-
-    res.json(heatmap);
+    res.json({
+      radius: 25, // mesmo valor usado no frontend
+      points: rows.map((r) => [r.lat, r.lng, 1]), // [lat, lng, peso]
+    });
   } catch (err) {
-    console.error('Erro ao obter heatmap:', err);
-    res.status(500).json({ erro: 'Erro ao obter dados do heatmap' });
+    console.error("Erro ao obter heatmap:", err);
+    res.status(500).json({ erro: "Erro ao obter dados do heatmap" });
   }
 };
